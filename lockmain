@@ -1,0 +1,262 @@
+-- Execute Adonis Bypass/Loader first
+loadstring(game:HttpGet("https://raw.githubusercontent.com/Pixeluted/adoniscries/refs/heads/main/Source.lua"))()
+
+local Config = {
+    ['Enabled']   = true,
+    ['HitPart']   = 'Closest Point', -- Options: 'Closest Point', 'Closest Part', 'Head', 'HumanoidRootPart'
+    ['HitChance'] = 100,             -- Percentage chance to hit (100 = always)
+    ['Prediction']= { ['X'] = 0, ['Y'] = 0, ['Z'] = 0 },
+    ['FOV'] = {
+        ['Enabled'] = true,
+        ['Radius']  = 120,          -- FOV Circle Radius (Adjustable size / slider value)
+        ['Color']   = Color3.fromRGB(255, 255, 255),
+        ['Require'] = true,         -- Must target be inside FOV for silent aim to work
+    },
+    ['Checks'] = {
+        ['Knocked']  = true,        -- Ignore knocked/KO players
+        ['Visible']  = true,        -- Require wall check (raycast)
+    }
+}
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local Camera = Workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+local Mouse = LocalPlayer:GetMouse()
+
+-- FOV Circle Drawing Object
+local FOVCircle = Drawing.new("Circle")
+FOVCircle.Visible = false
+FOVCircle.Filled = false
+FOVCircle.Thickness = 1
+FOVCircle.Transparency = 1
+FOVCircle.NumSides = 64
+
+local function isCharacterKnockedOrKO(character)
+    if not Config.Checks.Knocked then return false end
+    if not character then return false end
+    local bodyEffects = character:FindFirstChild("BodyEffects")
+    if not bodyEffects then return false end
+    local ko = bodyEffects:FindFirstChild("K.O")
+    if ko and ko.Value == true then return true end
+    local knocked = bodyEffects:FindFirstChild("Knocked")
+    if knocked and knocked.Value == true then return true end
+    return false
+end
+
+local function isSelfKnocked()
+    if not LocalPlayer.Character then return false end
+    local bodyEffects = LocalPlayer.Character:FindFirstChild("BodyEffects")
+    if not bodyEffects then return false end
+    local ko = bodyEffects:FindFirstChild("K.O")
+    if ko and ko.Value == true then return true end
+    local knocked = bodyEffects:FindFirstChild("Knocked")
+    if knocked and knocked.Value == true then return true end
+    return false
+end
+
+local function canSeeTarget(part)
+    if not Config.Checks.Visible then return true end
+    if not part or not part.Parent then return false end
+    local character = part.Parent
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return false end
+
+    local origin = Camera.CFrame.Position
+    local direction = (part.Position - origin).Unit * (part.Position - origin).Magnitude
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterDescendantsInstances = {LocalPlayer.Character, character}
+    raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+    raycastParams.IgnoreWater = true
+    local rayResult = Workspace:Raycast(origin, direction, raycastParams)
+    return rayResult == nil or (rayResult.Instance and rayResult.Instance:IsDescendantOf(character))
+end
+
+local function getClosestBodyPart(character)
+    if not character then return nil end
+    local closestPart = nil
+    local shortestDist = math.huge
+    local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+
+    local parts = {
+        character:FindFirstChild("Head"),
+        character:FindFirstChild("UpperTorso"),
+        character:FindFirstChild("LowerTorso"),
+        character:FindFirstChild("HumanoidRootPart"),
+    }
+
+    for i = 1, #parts do
+        local part = parts[i]
+        if not part then continue end
+        local pos, onScreen = Camera:WorldToViewportPoint(part.Position)
+        if not onScreen or pos.Z <= 0 then continue end
+        local screenPos = Vector2.new(pos.X, pos.Y)
+        local dist = (screenPos - screenCenter).Magnitude
+        if dist < shortestDist then
+            shortestDist = dist
+            closestPart = part
+        end
+    end
+
+    return closestPart
+end
+
+local function getClosestPointOnPart(part, origin)
+    if not part or not part:IsA("BasePart") then return nil end
+    local size = part.Size
+    local halfSize = size / 2
+    local cframe = part.CFrame
+
+    local localPos = cframe:PointToObjectSpace(origin)
+    local clamped = Vector3.new(
+        math.clamp(localPos.X, -halfSize.X, halfSize.X),
+        math.clamp(localPos.Y, -halfSize.Y, halfSize.Y),
+        math.clamp(localPos.Z, -halfSize.Z, halfSize.Z)
+    )
+    return cframe:PointToWorldSpace(clamped)
+end
+
+local function getClosestVisiblePoint(character)
+    if not character then return nil end
+    local origin = Camera.CFrame.Position
+    local closestPoint = nil
+    local shortestDist = math.huge
+    local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+
+    local parts = {
+        character:FindFirstChild("Head"),
+        character:FindFirstChild("UpperTorso"),
+        character:FindFirstChild("LowerTorso"),
+        character:FindFirstChild("HumanoidRootPart"),
+    }
+
+    for i = 1, #parts do
+        local part = parts[i]
+        if not part or not part:IsA("BasePart") then continue end
+        if not canSeeTarget(part) then continue end
+
+        local point = getClosestPointOnPart(part, origin)
+        if not point then continue end
+
+        local pos, onScreen = Camera:WorldToViewportPoint(point)
+        if not onScreen or pos.Z <= 0 then continue end
+
+        local screenPos = Vector2.new(pos.X, pos.Y)
+        local dist = (screenPos - screenCenter).Magnitude
+        if dist < shortestDist then
+            shortestDist = dist
+            closestPoint = point
+        end
+    end
+
+    return closestPoint
+end
+
+local function isInFOV(point)
+    if not Config.FOV.Enabled then return true end
+    if not point then return false end
+    local pos, onScreen = Camera:WorldToViewportPoint(point)
+    if not onScreen or pos.Z <= 0 then return false end
+    local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    local screenPos = Vector2.new(pos.X, pos.Y)
+    local dist = (screenPos - screenCenter).Magnitude
+    return dist <= Config.FOV.Radius
+end
+
+local function findClosestTarget()
+    local closestCharacter = nil
+    local shortestDistance = math.huge
+    local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+
+    for _, player in pairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+        local character = player.Character
+        if not character or not character:FindFirstChild("HumanoidRootPart") then continue end
+        if isCharacterKnockedOrKO(character) then continue end
+
+        local aimPart = getClosestBodyPart(character)
+        if not aimPart then continue end
+
+        local pos, onScreen = Camera:WorldToViewportPoint(aimPart.Position)
+        if not onScreen or pos.Z <= 0 then continue end
+
+        local dist = (Vector2.new(pos.X, pos.Y) - screenCenter).Magnitude
+        if Config.FOV.Enabled and Config.FOV.Require and dist > Config.FOV.Radius then continue end
+
+        if Config.Checks.Visible and not canSeeTarget(aimPart) then continue end
+
+        if dist < shortestDistance then
+            shortestDistance = dist
+            closestCharacter = character
+        end
+    end
+
+    return closestCharacter
+end
+
+local function getAimTarget(character)
+    local hitPart = Config.HitPart
+    if hitPart == 'Closest Part' then
+        return getClosestBodyPart(character)
+    elseif hitPart == 'Closest Point' then
+        return getClosestVisiblePoint(character)
+    else
+        return character:FindFirstChild(hitPart) or character:FindFirstChild("HumanoidRootPart")
+    end
+end
+
+-- Update FOV circle every frame
+RunService.RenderStepped:Connect(function()
+    if Config.FOV.Enabled then
+        FOVCircle.Visible = true
+        FOVCircle.Radius = Config.FOV.Radius
+        FOVCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+        FOVCircle.Color = Config.FOV.Color
+    else
+        FOVCircle.Visible = false
+    end
+end)
+
+-- Metatable Hook for Silent Aim
+local grm = getrawmetatable(game)
+local oldIndex = grm.__index
+setreadonly(grm, false)
+
+grm.__index = function(self, key)
+    if not checkcaller() and self == Mouse and Config.Enabled then
+        if key == "Hit" then
+            if isSelfKnocked() then return oldIndex(self, key) end
+
+            local targetCharacter = findClosestTarget()
+            if not targetCharacter then return oldIndex(self, key) end
+
+            local aimObj = getAimTarget(targetCharacter)
+            if not aimObj then return oldIndex(self, key) end
+
+            local aimPos = typeof(aimObj) == "Vector3" and aimObj or (aimObj and aimObj.Position)
+            if not aimPos then return oldIndex(self, key) end
+
+            if Config.FOV.Enabled and Config.FOV.Require and not isInFOV(aimPos) then
+                return oldIndex(self, key)
+            end
+
+            local pred = Config.Prediction
+            if pred and (pred.X ~= 0 or pred.Y ~= 0 or pred.Z ~= 0) then
+                local velocity = aimObj.AssemblyLinearVelocity or aimObj.Velocity or Vector3.new(0, 0, 0)
+                aimPos = aimPos + Vector3.new(velocity.X * pred.X, velocity.Y * pred.Y, velocity.Z * pred.Z)
+            end
+
+            local hitChance = Config.HitChance or 100
+            if hitChance < 100 then
+                if (math.random() * 100) > hitChance then
+                    return oldIndex(self, key)
+                end
+            end
+
+            return CFrame.new(aimPos)
+        end
+    end
+    return oldIndex(self, key)
+end
+setreadonly(grm, true)
